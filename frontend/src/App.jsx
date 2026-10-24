@@ -3,7 +3,6 @@ import { apiRequest, loginUser, registerUser } from "./api";
 import "./App.css";
 import Analytics from "./Analytics";
 
-const BUSINESS_ID = "b47603d4-325d-404a-ac6e-d6dc67efc90a";
 
 // Converts a backend conversation record into the shape the UI uses.
 function mapConversation(item) {
@@ -30,6 +29,7 @@ export default function App() {
   const [token, setToken] = useState(
     () => sessionStorage.getItem("resolveai_token") || ""
   );
+  const [businessId, setBusinessId] = useState("");
   const [authMode, setAuthMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -122,8 +122,9 @@ const [knowledgeContent, setKnowledgeContent] = useState("");
   }
 
 
+
 async function loadWorkspaceName() {
-  if (!token || !BUSINESS_ID) return;
+  if (!token) return;
 
   try {
     const businesses = await apiRequest(
@@ -132,18 +133,30 @@ async function loadWorkspaceName() {
       token
     );
 
-    const business = businesses.find(
-      (item) => String(item.id) === String(BUSINESS_ID)
-    );
-
-    if (business) {
-      setWorkspaceName(business.name);
-      setWorkspaceEmail(business.email || "");
+    if (!Array.isArray(businesses) || businesses.length === 0) {
+      setBusinessId("");
+      setWorkspaceName("ResolveAI Workspace");
+      setWorkspaceEmail("");
+      setConversations([]);
+      setMessages({});
+      setActiveId(null);
+      setApiError("No business found. Please create a business first.");
+      return;
     }
+
+    // Automatically select the first business accessible to this account.
+    const business = businesses[0];
+
+    setBusinessId(String(business.id));
+    setWorkspaceName(business.name || "ResolveAI Workspace");
+    setWorkspaceEmail(business.email || "");
+    setApiError("");
   } catch (error) {
-    console.error("Failed to load workspace name:", error);
+    console.error("Failed to load business:", error);
+    setApiError(error.message || "Could not load your business.");
   }
 }
+
 
   // ---------------------------------------------------------------------
   // Data loading
@@ -153,14 +166,14 @@ async function loadWorkspaceName() {
   // exists, otherwise selects the first conversation. Messages for the
   // selected conversation are loaded by the activeId effect below.
   async function loadRealConversations(preferredId) {
-    if (!token || !BUSINESS_ID) return;
+    if (!token || !businessId) return;
 
     setLoadingConversations(true);
     setApiError("");
 
     try {
       const data = await apiRequest(
-        `/businesses/${BUSINESS_ID}/conversations/`,
+        `/businesses/${businessId}/conversations/`,
         {},
         token
       );
@@ -182,11 +195,11 @@ async function loadWorkspaceName() {
   }
 
   async function loadRealMessages(conversationId) {
-    if (!token || !BUSINESS_ID || !conversationId) return;
+    if (!token || !businessId || !conversationId) return;
 
     try {
       const data = await apiRequest(
-        `/businesses/${BUSINESS_ID}/conversations/${conversationId}/messages`,
+        `/businesses/${businessId}/conversations/${conversationId}/messages`,
         {},
         token
       );
@@ -215,14 +228,14 @@ async function loadWorkspaceName() {
   }
 
   async function loadAnalytics() {
-    if (!token || !BUSINESS_ID) return;
+    if (!token || !businessId) return;
 
     setAnalyticsLoading(true);
     setAnalyticsError("");
 
     try {
       const data = await apiRequest(
-        `/businesses/${BUSINESS_ID}/conversations/analytics`,
+        `/businesses/${businessId}/conversations/analytics`,
         {},
         token
       );
@@ -239,14 +252,14 @@ async function loadWorkspaceName() {
 
   
 async function loadKnowledgeEntries() {
-  if (!token || !BUSINESS_ID) return;
+  if (!token || !businessId) return;
 
   setKnowledgeLoading(true);
   setKnowledgeError("");
 
   try {
     const data = await apiRequest(
-      `/businesses/${BUSINESS_ID}/knowledge/`,
+      `/businesses/${businessId}/knowledge/`,
       {},
       token
     );
@@ -266,7 +279,7 @@ async function loadKnowledgeEntries() {
 async function addKnowledgeEntry(event) {
   event.preventDefault();
 
-  if (!token || !BUSINESS_ID) return;
+  if (!token || !businessId) return;
 
   const title = knowledgeTitle.trim();
   const content = knowledgeContent.trim();
@@ -280,7 +293,7 @@ async function addKnowledgeEntry(event) {
 
   try {
     await apiRequest(
-      `/businesses/${BUSINESS_ID}/knowledge/`,
+      `/businesses/${businessId}/knowledge/`,
       {
         method: "POST",
         headers: {
@@ -304,7 +317,7 @@ async function addKnowledgeEntry(event) {
 
 
 async function deleteKnowledgeEntry(entryId) {
-  if (!token || !BUSINESS_ID) return;
+  if (!token || !businessId) return;
 
   const confirmed = window.confirm(
     "Are you sure you want to delete this knowledge entry?"
@@ -316,7 +329,7 @@ async function deleteKnowledgeEntry(entryId) {
 
   try {
     await apiRequest(
-      `/businesses/${BUSINESS_ID}/knowledge/${entryId}`,
+      `/businesses/${businessId}/knowledge/${entryId}`,
       { method: "DELETE" },
       token
     );
@@ -339,7 +352,7 @@ async function deleteKnowledgeEntry(entryId) {
   async function createNewConversation(event) {
     event.preventDefault();
 
-    if (!token || !BUSINESS_ID) {
+    if (!token || !businessId) {
       setApiError("Please sign in before creating a conversation.");
       return;
     }
@@ -354,7 +367,7 @@ async function deleteKnowledgeEntry(entryId) {
 
     try {
       const created = await apiRequest(
-        `/businesses/${BUSINESS_ID}/conversations/`,
+        `/businesses/${businessId}/conversations/`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -388,13 +401,13 @@ async function deleteKnowledgeEntry(entryId) {
   }
 
   async function updateConversationStatus(conversationId, newStatus) {
-    if (!token || !BUSINESS_ID || !conversationId) return;
+    if (!token || !businessId || !conversationId) return;
 
     setApiError("");
 
     try {
       await apiRequest(
-        `/businesses/${BUSINESS_ID}/conversations/${conversationId}/status`,
+        `/businesses/${businessId}/conversations/${conversationId}/status`,
         {
           method: "PATCH",
           body: JSON.stringify({ status: newStatus }),
@@ -426,7 +439,7 @@ async function sendMessage(event) {
 
   const content = message.trim();
 
-  if (!content || !token || !BUSINESS_ID || !activeId || sending) {
+  if (!content || !token || !businessId || !activeId || sending) {
     return;
   }
 
@@ -456,7 +469,7 @@ async function sendMessage(event) {
 
   try {
     await apiRequest(
-      `/businesses/${BUSINESS_ID}/conversations/${conversationId}/reply`,
+      `/businesses/${businessId}/conversations/${conversationId}/reply`,
       {
         method: "POST",
         body: JSON.stringify({ message: content }),
@@ -532,11 +545,24 @@ async function sendMessage(event) {
   
 useEffect(() => {
   if (token) {
-    loadRealConversations();
     loadWorkspaceName();
+  } else {
+    setBusinessId("");
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [token]);
+
+useEffect(() => {
+  if (token && businessId) {
+    loadRealConversations();
+    loadKnowledgeEntries();
+
+    if (currentPage === "analytics") {
+      loadAnalytics();
+    }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [token, businessId]);
 
 
   // Load messages whenever the selected conversation changes.
@@ -1194,7 +1220,7 @@ useEffect(() => {
       const token = sessionStorage.getItem("resolveai_token");
 
       const updatedBusiness = await apiRequest(
-        `/businesses/${BUSINESS_ID}`,
+        `/businesses/${businessId}`,
         {
           method: "PATCH",
           body: JSON.stringify({
