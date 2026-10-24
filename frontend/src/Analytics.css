@@ -1,0 +1,68 @@
+
+.analytics-section {
+  margin: 24px 0;
+  color: #f4f3fa;
+}
+
+.analytics-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.analytics-heading h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.analytics-heading p,
+.analytics-note {
+  color: #8c90a4;
+  font-size: 12px;
+}
+
+.analytics-live {
+  color: #79dbb1;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.analytics-card {
+  min-width: 0;
+  padding: 20px;
+  background: #11121b;
+  border: 1px solid #272938;
+  border-radius: 12px;
+}
+
+.analytics-card h3 {
+  margin: 0 0 18px;
+  font-size: 14px;
+}
+
+.analytics-chart {
+  position: relative;
+  height: 250px;
+}
+
+.analytics-note {
+  margin: 14px 0 0;
+}
+
+@media (max-width: 760px) {
+  .analytics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-card {
+    padding: 16px;
+  }
+}

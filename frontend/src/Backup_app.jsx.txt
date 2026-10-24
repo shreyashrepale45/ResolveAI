@@ -1,0 +1,1112 @@
+import { useEffect, useState } from "react";
+import { apiRequest, loginUser, registerUser } from "./api";
+import "./App.css";
+import Analytics from "./Analytics";
+
+const BUSINESS_ID = "b47603d4-325d-404a-ac6e-d6dc67efc90a";
+
+// Converts a backend conversation record into the shape the UI uses.
+function mapConversation(item) {
+  return {
+    id: item.id,
+    name: item.customer_name || "Unknown Customer",
+    subject: item.subject || "Customer inquiry",
+    preview: item.customer_email || "No messages yet",
+    time: "",
+    status: item.status?.toLowerCase() === "resolved" ? "Resolved" : "Open",
+    initials: (item.customer_name || "UC")
+      .split(" ")
+      .filter(Boolean)
+      .map((part) => part[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase(),
+    color: "violet",
+  };
+}
+
+export default function App() {
+  // ---- Auth state ----
+  const [token, setToken] = useState(
+    () => sessionStorage.getItem("resolveai_token") || ""
+  );
+  const [authMode, setAuthMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // ---- Conversation state ----
+  const [apiError, setApiError] = useState("");
+  const [loadingConversations, setLoadingConversations] = useState(false);
+  const [showNewConversation, setShowNewConversation] = useState(false);
+  const [newSubject, setNewSubject] = useState("");
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerEmail, setNewCustomerEmail] = useState("");
+  const [creatingConversation, setCreatingConversation] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [filter, setFilter] = useState("All");
+  const [activeId, setActiveId] = useState(null);
+  const [message, setMessage] = useState("");
+  const [search, setSearch] = useState("");
+  const [conversations, setConversations] = useState([]);
+  const [messages, setMessages] = useState({});
+
+  // ---- Page / analytics state ----
+  const [currentPage, setCurrentPage] = useState("conversations");
+  const [analyticsData, setAnalyticsData] = useState(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState("");
+
+  // ---------------------------------------------------------------------
+  // Auth handlers
+  // ---------------------------------------------------------------------
+  async function handleAuthSubmit(event) {
+    event.preventDefault();
+    setAuthError("");
+    setAuthLoading(true);
+
+    try {
+      if (authMode === "register") {
+        await registerUser(email.trim(), password);
+      }
+
+      const result = await loginUser(email.trim(), password);
+
+      if (!result.access_token) {
+        throw new Error("Login succeeded, but no access token was returned.");
+      }
+
+      sessionStorage.setItem("resolveai_token", result.access_token);
+      setToken(result.access_token);
+      setPassword("");
+    } catch (error) {
+      setAuthError(error.message || "Authentication failed. Please try again.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  function handleLogout() {
+    sessionStorage.removeItem("resolveai_token");
+    setToken("");
+    setPassword("");
+    setAuthError("");
+    setAuthMode("login");
+
+    // Clear workspace data so it can't flash for the next signed-in user.
+    setConversations([]);
+    setMessages({});
+    setActiveId(null);
+    setAnalyticsData(null);
+    setAnalyticsError("");
+    setApiError("");
+    setCurrentPage("conversations");
+  }
+
+  // ---------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------
+
+  // Loads the conversation list. Keeps the current selection if it still
+  // exists, otherwise selects the first conversation. Messages for the
+  // selected conversation are loaded by the activeId effect below.
+  async function loadRealConversations(preferredId) {
+    if (!token || !BUSINESS_ID) return;
+
+    setLoadingConversations(true);
+    setApiError("");
+
+    try {
+      const data = await apiRequest(
+        `/businesses/${BUSINESS_ID}/conversations/`,
+        {},
+        token
+      );
+
+      const list = data.map(mapConversation);
+      setConversations(list);
+
+      setActiveId((current) => {
+        const wanted = preferredId || current;
+        if (wanted && list.some((item) => item.id === wanted)) return wanted;
+        return list.length > 0 ? list[0].id : null;
+      });
+    } catch (error) {
+      console.error("Failed to load conversations:", error);
+      setApiError(error.message || "Could not load conversations.");
+    } finally {
+      setLoadingConversations(false);
+    }
+  }
+
+  async function loadRealMessages(conversationId) {
+    if (!token || !BUSINESS_ID || !conversationId) return;
+
+    try {
+      const data = await apiRequest(
+        `/businesses/${BUSINESS_ID}/conversations/${conversationId}/messages`,
+        {},
+        token
+      );
+
+      const realMessages = data.map((item) => ({
+        role: item.role === "assistant" ? "assistant" : "customer",
+        content: item.content,
+        time: item.created_at
+          ? new Date(item.created_at).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "",
+      }));
+
+      // Stored under the conversation's own id, so a late response for a
+      // previously selected conversation cannot overwrite the current one.
+      setMessages((previous) => ({
+        ...previous,
+        [conversationId]: realMessages,
+      }));
+    } catch (error) {
+      console.error("Failed to load messages:", error);
+      setApiError(error.message || "Could not load messages.");
+    }
+  }
+
+  async function loadAnalytics() {
+    if (!token || !BUSINESS_ID) return;
+
+    setAnalyticsLoading(true);
+    setAnalyticsError("");
+
+    try {
+      const data = await apiRequest(
+        `/businesses/${BUSINESS_ID}/conversations/analytics`,
+        {},
+        token
+      );
+
+      setAnalyticsData(data);
+    } catch (error) {
+      console.error("Failed to load analytics:", error);
+      setAnalyticsError(error.message || "Could not load analytics.");
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Conversation actions
+  // ---------------------------------------------------------------------
+  async function createNewConversation(event) {
+    event.preventDefault();
+
+    if (!token || !BUSINESS_ID) {
+      setApiError("Please sign in before creating a conversation.");
+      return;
+    }
+
+    if (!newSubject.trim() || !newCustomerName.trim()) {
+      setApiError("Subject and customer name are required.");
+      return;
+    }
+
+    setCreatingConversation(true);
+    setApiError("");
+
+    try {
+      const created = await apiRequest(
+        `/businesses/${BUSINESS_ID}/conversations/`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            subject: newSubject.trim(),
+            customer_name: newCustomerName.trim(),
+            customer_email: newCustomerEmail.trim() || null,
+          }),
+        },
+        token
+      );
+
+      setShowNewConversation(false);
+      setNewSubject("");
+      setNewCustomerName("");
+      setNewCustomerEmail("");
+
+      // Reload the list and select the new conversation.
+      
+      // Reload the list and select the new conversation.
+      await loadRealConversations(created?.id);
+
+      // Refresh analytics after creating the conversation.
+      await loadAnalytics();
+
+    } catch (error) {
+      console.error("Failed to create conversation:", error);
+      setApiError(error.message || "Could not create conversation.");
+    } finally {
+      setCreatingConversation(false);
+    }
+  }
+
+  async function updateConversationStatus(conversationId, newStatus) {
+    if (!token || !BUSINESS_ID || !conversationId) return;
+
+    setApiError("");
+
+    try {
+      await apiRequest(
+        `/businesses/${BUSINESS_ID}/conversations/${conversationId}/status`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: newStatus }),
+        },
+        token
+      );
+
+      setConversations((previous) =>
+        previous.map((conversation) =>
+          conversation.id === conversationId
+            ? {
+                ...conversation,
+                status: newStatus === "resolved" ? "Resolved" : "Open",
+              }
+            : conversation
+        )
+      );
+
+      await loadAnalytics();
+
+    } catch (error) {
+      setApiError(error.message || "Could not update conversation status.");
+    }
+  }
+
+  async function sendMessage(event) {
+    event.preventDefault();
+
+    const content = message.trim();
+    if (!content || !token || !BUSINESS_ID || !activeId || sending) return;
+
+    setSending(true);
+    setApiError("");
+    setMessage("");
+
+    const conversationId = activeId;
+
+    setMessages((previous) => ({
+      ...previous,
+      [conversationId]: [
+        ...(previous[conversationId] || []),
+        {
+          role: "customer",
+          content,
+          time: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ],
+    }));
+
+    try {
+      await apiRequest(
+        `/businesses/${BUSINESS_ID}/conversations/${conversationId}/reply`,
+        {
+          method: "POST",
+          body: JSON.stringify({ message: content }),
+        },
+        token
+      );
+
+      
+      await loadRealMessages(conversationId);
+
+      // Refresh analytics after sending the message.
+      await loadAnalytics();
+
+    } catch (error) {
+      console.error("Failed to send message:", error);
+      setApiError(error.message || "Could not send your message.");
+      setMessage(content);
+      await loadRealMessages(conversationId);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Derived values
+  // ---------------------------------------------------------------------
+  const activeConversation = conversations.find(
+    (conversation) => conversation.id === activeId
+  );
+
+  const activeMessages = messages[activeId] || [];
+
+  const filteredConversations = conversations.filter(
+    (conversation) =>
+      `${conversation.name} ${conversation.subject} ${conversation.preview}`
+        .toLowerCase()
+        .includes(search.toLowerCase()) &&
+      (filter === "All" || conversation.status === filter)
+  );
+
+  // Round the backend resolution rate for display only.
+  const rawRate = Number(analyticsData?.resolution_rate ?? 0);
+  const displayRate = Number.isFinite(rawRate)
+    ? Math.round(rawRate * 10) / 10
+    : 0;
+
+  // ---------------------------------------------------------------------
+  // Effects (all hooks run before the early return below)
+  // ---------------------------------------------------------------------
+
+  // Load the conversation list once a token is available.
+  useEffect(() => {
+    if (token) {
+      loadRealConversations();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  // Load messages whenever the selected conversation changes.
+  useEffect(() => {
+    if (token && activeId) {
+      loadRealMessages(activeId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, activeId]);
+
+  // Load analytics whenever the Analytics page is opened.
+  useEffect(() => {
+    if (token && currentPage === "analytics") {
+      loadAnalytics();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, currentPage]);
+
+  // ---------------------------------------------------------------------
+  // Signed-out view
+  // ---------------------------------------------------------------------
+  if (!token) {
+    return (
+      <div className="auth-page">
+        <div className="auth-card">
+          <div className="auth-brand">
+            <div className="auth-logo">R</div>
+            <div>
+              <h1>ResolveAI</h1>
+              <p>Customer intelligence platform</p>
+            </div>
+          </div>
+
+          <div className="auth-heading">
+            <span className="auth-eyebrow">AI-POWERED CUSTOMER SUPPORT</span>
+            <h2>
+              {authMode === "login" ? "Welcome back" : "Create your account"}
+            </h2>
+            <p>
+              {authMode === "login"
+                ? "Sign in to continue to your workspace."
+                : "Register to get started with ResolveAI."}
+            </p>
+          </div>
+
+          <form className="auth-form" onSubmit={handleAuthSubmit}>
+            <label htmlFor="auth-email">Email address</label>
+            <input
+              id="auth-email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@example.com"
+              autoComplete="email"
+              required
+            />
+
+            <label htmlFor="auth-password">Password</label>
+            <input
+              id="auth-password"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Enter your password"
+              autoComplete={
+                authMode === "login" ? "current-password" : "new-password"
+              }
+              minLength={8}
+              required
+            />
+
+            {authError && (
+              <div className="auth-error" role="alert">
+                {authError}
+              </div>
+            )}
+
+            <button
+              className="auth-submit"
+              type="submit"
+              disabled={authLoading}
+            >
+              {authLoading
+                ? "Please wait..."
+                : authMode === "login"
+                  ? "Sign in"
+                  : "Create account"}
+            </button>
+          </form>
+
+          <div className="auth-switch">
+            {authMode === "login"
+              ? "Don't have an account?"
+              : "Already have an account?"}{" "}
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode(authMode === "login" ? "register" : "login");
+                setAuthError("");
+              }}
+            >
+              {authMode === "login" ? "Register" : "Sign in"}
+            </button>
+          </div>
+
+          <p className="auth-footer">
+            Secure access to your customer support workspace.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Signed-in view
+  // ---------------------------------------------------------------------
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">R</div>
+          <div>
+            <div className="brand-name">ResolveAI</div>
+            <div className="brand-caption">CUSTOMER INTELLIGENCE</div>
+          </div>
+        </div>
+
+        <div className="workspace-label">WORKSPACE</div>
+        <button className="workspace-switch">
+          <span className="workspace-avatar">R</span>
+          <span className="workspace-text">
+            <strong>ResolveAI Workspace</strong>
+            <small>Support workspace</small>
+          </span>
+          <span className="chevron">⌄</span>
+        </button>
+
+        <div className="nav-label">MENU</div>
+        
+<button
+  type="button"
+  className={`nav-item ${currentPage === "overview" ? "active" : ""}`}
+  onClick={() => setCurrentPage("overview")}
+>
+  <span>◫</span> Overview
+</button>
+
+
+        <button
+          type="button"
+          className={`nav-item ${currentPage === "conversations" ? "active" : ""}`}
+          onClick={() => setCurrentPage("conversations")}
+        >
+          <span>▤</span> Conversations
+          <span className="nav-count">{conversations.length}</span>
+        </button>
+
+       
+<button
+  type="button"
+  className={`nav-item ${currentPage === "activity" ? "active" : ""}`}
+  onClick={() => setCurrentPage("activity")}
+>
+  <span>◷</span> Activity
+</button>
+
+
+        <div className="nav-label tools-label">WORKSPACE TOOLS</div>
+        
+<button
+  type="button"
+  className={`nav-item ${currentPage === "assistant" ? "active" : ""}`}
+  onClick={() => setCurrentPage("assistant")}
+>
+  <span>✧</span> AI assistant
+  <span className="online-dot" />
+</button>
+
+
+        <button
+          type="button"
+          className={`nav-item ${currentPage === "analytics" ? "active" : ""}`}
+          onClick={() => setCurrentPage("analytics")}
+        >
+          <span>▥</span> Analytics
+        </button>
+
+        
+<button
+  type="button"
+  className={`nav-item ${currentPage === "settings" ? "active" : ""}`}
+  onClick={() => setCurrentPage("settings")}
+>
+  <span>⚙</span> Settings
+</button>
+
+
+        <div className="sidebar-bottom">
+          <div className="plan-card">
+            <div className="plan-icon">✦</div>
+            <strong>AI-powered support</strong>
+            <p>Your workspace is ready for smarter customer conversations.</p>
+          </div>
+          <div className="profile">
+            <div className="profile-avatar">SR</div>
+            <div className="profile-info">
+              <strong>Workspace admin</strong>
+              <small>Administrator</small>
+            </div>
+            <span className="profile-menu">···</span>
+          </div>
+        </div>
+      </aside>
+
+      <main className="main-panel">
+        <header className="topbar">
+          <div className="breadcrumbs">
+            <span>Workspace</span>
+            <span className="breadcrumb-divider">/</span>
+            
+<strong>
+  {{
+    overview: "Overview",
+    conversations: "Conversations",
+    activity: "Activity",
+    assistant: "AI Assistant",
+    analytics: "Analytics",
+    settings: "Settings",
+  }[currentPage] || "ResolveAI"}
+</strong>
+
+          </div>
+          <div className="topbar-actions">
+            <div className="system-status">
+              <span className="online-dot" /> AI system online
+            </div>
+            <button className="icon-button" aria-label="Notifications">
+              ♧
+            </button>
+            <div className="top-avatar">SR</div>
+            <button
+              type="button"
+              className="outline-button"
+              onClick={handleLogout}
+            >
+              Sign out
+            </button>
+          </div>
+        </header>
+
+        {currentPage === "analytics" ? (
+          <div className="analytics-page">
+            <section className="page-heading">
+              <div>
+                <div className="eyebrow">CUSTOMER INSIGHTS</div>
+                <h1>Analytics</h1>
+                <p>Understand your customer support performance.</p>
+              </div>
+
+              <button
+                type="button"
+                className="outline-button"
+                onClick={loadAnalytics}
+                disabled={analyticsLoading}
+              >
+                {analyticsLoading ? "Refreshing..." : "↻ Refresh data"}
+              </button>
+            </section>
+
+            {analyticsError && (
+              <p style={{ color: "#ff7777" }} role="alert">
+                {analyticsError}
+              </p>
+            )}
+
+            <section className="stats-grid">
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Total conversations</span>
+                  <span className="stat-icon violet">▤</span>
+                </div>
+                <div className="stat-number">
+                  {analyticsLoading
+                    ? "..."
+                    : (analyticsData?.total_conversations ?? 0)}
+                </div>
+                <div className="stat-foot">All conversations</div>
+              </div>
+
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Open conversations</span>
+                  <span className="stat-icon amber">◷</span>
+                </div>
+                <div className="stat-number">
+                  {analyticsLoading
+                    ? "..."
+                    : (analyticsData?.open_conversations ?? 0)}
+                </div>
+                <div className="stat-foot">Awaiting resolution</div>
+              </div>
+
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Resolved conversations</span>
+                  <span className="stat-icon green">✓</span>
+                </div>
+                <div className="stat-number">
+                  {analyticsLoading
+                    ? "..."
+                    : (analyticsData?.resolved_conversations ?? 0)}
+                </div>
+                <div className="stat-foot">Marked resolved</div>
+              </div>
+
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Resolution rate</span>
+                  <span className="stat-icon violet">%</span>
+                </div>
+                <div className="stat-number">
+                  {analyticsLoading ? "..." : `${displayRate}%`}
+                </div>
+                <div className="stat-foot">Resolved ÷ total</div>
+              </div>
+            </section>
+
+            <Analytics
+  analyticsData={analyticsData}
+  analyticsLoading={analyticsLoading}
+/>
+          </div>
+        ) : (
+          <>
+            <section className="page-heading">
+              <div>
+                <div className="eyebrow">CUSTOMER SUPPORT CENTER</div>
+                <h1>Conversations</h1>
+                <p>Manage customer requests with your AI support assistant.</p>
+              </div>
+
+              <button
+                className="new-conversation"
+                onClick={() => {
+                  setApiError("");
+                  setShowNewConversation(true);
+                }}
+              >
+                <span>＋</span> New conversation
+              </button>
+            </section>
+
+            {showNewConversation && (
+              <div
+                style={{
+                  marginBottom: "20px",
+                  padding: "24px",
+                  background: "#171923",
+                  border: "1px solid #303447",
+                  borderRadius: "14px",
+                }}
+              >
+                <h2 style={{ marginTop: 0 }}>Create a conversation</h2>
+
+                <form onSubmit={createNewConversation}>
+                  <label>Customer name</label>
+                  <input
+                    value={newCustomerName}
+                    onChange={(event) => setNewCustomerName(event.target.value)}
+                    placeholder="e.g. Rahul Sharma"
+                    required
+                  />
+
+                  <label>Customer email</label>
+                  <input
+                    type="email"
+                    value={newCustomerEmail}
+                    onChange={(event) =>
+                      setNewCustomerEmail(event.target.value)
+                    }
+                    placeholder="customer@example.com"
+                  />
+
+                  <label>Conversation subject</label>
+                  <input
+                    value={newSubject}
+                    onChange={(event) => setNewSubject(event.target.value)}
+                    placeholder="e.g. Order delivery inquiry"
+                    required
+                  />
+
+                  {apiError && <p style={{ color: "#ff7777" }}>{apiError}</p>}
+
+                  <div
+                    style={{ display: "flex", gap: "10px", marginTop: "16px" }}
+                  >
+                    <button type="submit" disabled={creatingConversation}>
+                      {creatingConversation
+                        ? "Creating..."
+                        : "Create conversation"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowNewConversation(false)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            <div style={{ marginBottom: "16px" }}>
+              <button
+                type="button"
+                className="outline-button"
+                onClick={() => loadRealConversations()}
+                disabled={loadingConversations}
+              >
+                {loadingConversations
+                  ? "Refreshing..."
+                  : "↻ Refresh conversations"}
+              </button>
+
+              {apiError && !showNewConversation && (
+                <p style={{ color: "red" }}>{apiError}</p>
+              )}
+            </div>
+
+            <section className="stats-grid">
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Total conversations</span>
+                  <span className="stat-icon violet">▤</span>
+                </div>
+                <div className="stat-number">{conversations.length}</div>
+                <div className="stat-foot">Across your workspace</div>
+              </div>
+
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Open conversations</span>
+                  <span className="stat-icon amber">◷</span>
+                </div>
+                <div className="stat-number">
+                  {conversations.filter((item) => item.status === "Open").length}
+                </div>
+                <div className="stat-foot">Awaiting resolution</div>
+              </div>
+
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Resolved conversations</span>
+                  <span className="stat-icon green">✓</span>
+                </div>
+                <div className="stat-number">
+                  {
+                    conversations.filter((item) => item.status === "Resolved")
+                      .length
+                  }
+                </div>
+                <div className="stat-foot">Successfully marked resolved</div>
+              </div>
+
+              <div className="stat-card">
+                <div className="stat-top">
+                  <span>Resolution rate</span>
+                  <span className="stat-icon violet">%</span>
+                </div>
+                <div className="stat-number">
+                  {conversations.length === 0
+                    ? 0
+                    : Math.round(
+                        (conversations.filter(
+                          (item) => item.status === "Resolved"
+                        ).length /
+                          conversations.length) *
+                          100
+                      )}
+                  %
+                </div>
+                <div className="stat-foot">Percentage of all conversations</div>
+              </div>
+            </section>
+
+            <section className="inbox">
+              <div className="conversation-panel">
+                <div className="panel-heading">
+                  <div>
+                    <h2>
+                      Inbox <span>{conversations.length}</span>
+                    </h2>
+                    <p>Your recent customer conversations</p>
+                  </div>
+
+                  <button
+                    className="icon-button small"
+                    aria-label="Inbox options"
+                  >
+                    ···
+                  </button>
+                </div>
+
+                <div className="search-box">
+                  <span>⌕</span>
+                  <input
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    placeholder="Search conversations..."
+                  />
+                  <kbd>/</kbd>
+                </div>
+
+                <div className="filter-row">
+                  <button
+                    type="button"
+                    className={filter === "All" ? "filter-active" : ""}
+                    onClick={() => setFilter("All")}
+                  >
+                    All messages
+                  </button>
+
+                  <button
+                    type="button"
+                    className={filter === "Open" ? "filter-active" : ""}
+                    onClick={() => setFilter("Open")}
+                  >
+                    Open
+                  </button>
+
+                  <button
+                    type="button"
+                    className={filter === "Resolved" ? "filter-active" : ""}
+                    onClick={() => setFilter("Resolved")}
+                  >
+                    Resolved
+                  </button>
+                </div>
+
+                <div className="conversation-list">
+                  {filteredConversations.map((conversation) => (
+                    <button
+                      key={conversation.id}
+                      className={`conversation-item ${
+                        activeId === conversation.id ? "selected" : ""
+                      }`}
+                      onClick={() => setActiveId(conversation.id)}
+                    >
+                      <div className={`contact-avatar ${conversation.color}`}>
+                        {conversation.initials}
+                      </div>
+                      <div className="conversation-info">
+                        <div className="conversation-first-line">
+                          <strong>{conversation.name}</strong>
+                          <time>{conversation.time}</time>
+                        </div>
+                        <div className="conversation-subject">
+                          {conversation.subject}
+                        </div>
+                        <div className="conversation-preview">
+                          {conversation.preview}
+                        </div>
+                        <span
+                          className={`status-pill ${
+                            conversation.status === "Resolved" ? "resolved" : ""
+                          }`}
+                        >
+                          {conversation.status}
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+
+                  {filteredConversations.length === 0 && (
+                    <div className="empty-search">
+                      No matching conversations.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="chat-panel">
+                {activeConversation ? (
+                  <>
+                    <div className="chat-header">
+                      <div
+                        className={`contact-avatar ${activeConversation.color}`}
+                      >
+                        {activeConversation.initials}
+                      </div>
+
+                      <div className="chat-contact">
+                        <strong>{activeConversation.name}</strong>
+                        <span>
+                          <span className="online-dot" /> Customer conversation
+                        </span>
+                      </div>
+
+                      <div className="chat-header-actions">
+                        <button
+                          type="button"
+                          className="outline-button"
+                          onClick={() =>
+                            updateConversationStatus(
+                              activeConversation.id,
+                              activeConversation.status === "Resolved"
+                                ? "open"
+                                : "resolved"
+                            )
+                          }
+                        >
+                          {activeConversation.status === "Resolved"
+                            ? "↻ Reopen"
+                            : "✓ Resolve"}
+                        </button>
+
+                        <button className="outline-button">☆ Follow</button>
+
+                        <button
+                          className="icon-button small"
+                          aria-label="More options"
+                        >
+                          ···
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="conversation-subheader">
+                      <div>
+                        <span className="subject-label">SUBJECT</span>
+                        <strong>{activeConversation.subject}</strong>
+                      </div>
+
+                      <span className="status-pill">
+                        {activeConversation.status}
+                      </span>
+                    </div>
+
+                    <div className="chat-messages">
+                      <div className="date-divider">
+                        <span>Today</span>
+                      </div>
+
+                      {activeMessages.map((item, index) => (
+                        <div
+                          className={`message-row ${
+                            item.role === "assistant" ? "assistant-row" : ""
+                          }`}
+                          key={`${activeId}-${index}`}
+                        >
+                          <div
+                            className={`message-avatar ${
+                              item.role === "assistant"
+                                ? "ai-avatar"
+                                : "customer-avatar"
+                            }`}
+                          >
+                            {item.role === "assistant"
+                              ? "✦"
+                              : activeConversation.initials}
+                          </div>
+
+                          <div className="message-body">
+                            <div className="message-meta">
+                              <strong>
+                                {item.role === "assistant"
+                                  ? "ResolveAI Assistant"
+                                  : activeConversation.name}
+                              </strong>
+                              <time>{item.time}</time>
+                            </div>
+
+                            <div className={`message-bubble ${item.role}`}>
+                              {item.content}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="ai-suggestion">
+                      <div className="suggestion-icon">✧</div>
+                      <div>
+                        <strong>ResolveAI assistant</strong>
+                        <p>AI-powered customer support with Gemini.</p>
+                      </div>
+                      <span className="suggestion-badge">AI POWERED</span>
+                    </div>
+
+                    <form className="composer" onSubmit={sendMessage}>
+                      <textarea
+                        value={message}
+                        onChange={(event) => setMessage(event.target.value)}
+                        placeholder="Write a reply..."
+                        rows={2}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            event.currentTarget.form.requestSubmit();
+                          }
+                        }}
+                      />
+                      <div className="composer-footer">
+                        <div className="composer-tools">
+                          <span>↗</span>
+                          <span>☺</span>
+                          <span className="composer-hint">
+                            Enter to send · Shift + Enter for a new line
+                          </span>
+                        </div>
+                        <button
+                          className="send-button"
+                          type="submit"
+                          disabled={sending || !message.trim()}
+                        >
+                          {sending ? "Sending..." : "Send"} <span>↑</span>
+                        </button>
+                      </div>
+                    </form>
+                  </>
+                ) : (
+                  <div className="empty-chat">
+                    Select a conversation to view messages.
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <footer className="footer">
+              <span>© 2026 ResolveAI</span>
+              <span>
+                <span className="online-dot" /> Connected to your support
+                workspace
+              </span>
+            </footer>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
